@@ -17,6 +17,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Coins,
+  Square,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -226,14 +227,22 @@ export function ChatPage({ userName }: ChatPageProps) {
     const content = (text || input).trim();
     if (!content) return;
 
-    // Double-send guard: use ref to prevent race conditions
+    // Strict guard: if already sending, completely ignore this call
     if (sendingRef.current) return;
     sendingRef.current = true;
 
-    // Abort any in-flight request first
+    // Immediately update UI to disable all send triggers
+    setInput("");
+    setIsLoading(true);
+    setStreamingContent("");
+
+    if (inputRef.current) {
+      inputRef.current.style.height = "auto";
+    }
+
+    // Abort any previous in-flight request
     if (abortRef.current) {
-      abortRef.current.abort();
-      abortRef.current = null;
+      try { abortRef.current.abort(); } catch { /* ignore */ }
     }
 
     // Ensure we have a conversation
@@ -261,13 +270,6 @@ export function ChatPage({ userName }: ChatPageProps) {
     };
 
     setMessages((prev) => [...prev, userMessage]);
-    setInput("");
-    setIsLoading(true);
-    setStreamingContent("");
-
-    if (inputRef.current) {
-      inputRef.current.style.height = "auto";
-    }
 
     // Save user message to DB
     if (convoId) saveMessageToDB(convoId, "user", content);
@@ -301,6 +303,7 @@ export function ChatPage({ userName }: ChatPageProps) {
       let accumulated = "";
       let usage: TokenUsage | undefined;
 
+      // eslint-disable-next-line no-constant-condition
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -353,14 +356,15 @@ export function ChatPage({ userName }: ChatPageProps) {
       // Refresh conversation list
       fetchConversations();
     } catch (error) {
-      if ((error as Error).name === "AbortError") return;
-      const errorMessage: Message = {
-        id: crypto.randomUUID(),
-        role: "assistant",
-        content: `抱歉，發生錯誤：${error instanceof Error ? error.message : "未知錯誤"}。請稍後再試。`,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMessage]);
+      if ((error as Error).name !== "AbortError") {
+        const errorMessage: Message = {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `抱歉，發生錯誤：${error instanceof Error ? error.message : "未知錯誤"}。請稍後再試。`,
+          timestamp: new Date(),
+        };
+        setMessages((prev) => [...prev, errorMessage]);
+      }
       setStreamingContent("");
     } finally {
       setIsLoading(false);
@@ -374,6 +378,28 @@ export function ChatPage({ userName }: ChatPageProps) {
       e.preventDefault();
       sendMessage();
     }
+  };
+
+  const stopGeneration = () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    // Finalize any accumulated streaming content as a message
+    if (streamingContent) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: streamingContent + "\n\n_(已停止生成)_",
+          timestamp: new Date(),
+        },
+      ]);
+    }
+    setStreamingContent("");
+    setIsLoading(false);
+    sendingRef.current = false;
   };
 
   const hasMessages = messages.length > 0 || streamingContent;
@@ -513,7 +539,10 @@ export function ChatPage({ userName }: ChatPageProps) {
                   </span>
                 ))}
               </div>
-              <div className="grid w-full max-w-2xl gap-2 sm:grid-cols-2">
+              <div className={cn(
+                "grid w-full max-w-2xl gap-2 sm:grid-cols-2",
+                isLoading && "pointer-events-none opacity-50"
+              )}>
                 {SUGGESTED_QUESTIONS.map((q) => (
                   <button
                     key={q.label}
@@ -629,14 +658,26 @@ export function ChatPage({ userName }: ChatPageProps) {
                       Math.min(target.scrollHeight, 160) + "px";
                   }}
                 />
-                <Button
-                  size="icon-sm"
-                  onClick={() => sendMessage()}
-                  disabled={!input.trim() || isLoading}
-                  className="absolute bottom-1.5 right-1.5 sm:bottom-2 sm:right-2"
-                >
-                  <Send className="h-3.5 w-3.5" />
-                </Button>
+                {isLoading ? (
+                  <Button
+                    size="icon-sm"
+                    variant="destructive"
+                    onClick={stopGeneration}
+                    className="absolute bottom-1.5 right-1.5 sm:bottom-2 sm:right-2"
+                    title="停止生成"
+                  >
+                    <Square className="h-3 w-3" />
+                  </Button>
+                ) : (
+                  <Button
+                    size="icon-sm"
+                    onClick={() => sendMessage()}
+                    disabled={!input.trim()}
+                    className="absolute bottom-1.5 right-1.5 sm:bottom-2 sm:right-2"
+                  >
+                    <Send className="h-3.5 w-3.5" />
+                  </Button>
+                )}
               </div>
             </div>
             <div className="mt-1.5 flex items-center justify-between sm:mt-2">
