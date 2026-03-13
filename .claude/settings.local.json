@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(test:*)",
+      "Bash(du:*)",
+      "Bash(wc:*)",
+      "WebSearch",
+      "Bash(npm install:*)",
+      "Bash(npx prisma:*)",
+      "Bash(npx tsx:*)",
+      "Bash(npx shadcn@latest:*)",
+      "Bash(npx next:*)"
+    ]
+  }
+}

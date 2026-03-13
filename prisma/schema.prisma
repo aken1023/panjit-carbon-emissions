@@ -1,0 +1,223 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// M8: System Management - Users & Organizations
+// ============================================
+
+model User {
+  id         String   @id @default(cuid())
+  name       String
+  email      String   @unique
+  password   String
+  role       String   @default("DATA_ENTRY") // ADMIN, CARBON_MANAGER, DATA_ENTRY, AUDITOR, VIEWER
+  orgId      String
+  createdAt  DateTime @default(now())
+
+  organization   Organization    @relation(fields: [orgId], references: [id])
+  activityData   ActivityData[]  @relation("EnteredBy")
+  reviewedData   ActivityData[]  @relation("ReviewedBy")
+  taskAssignments TaskAssignment[]
+
+  @@index([orgId])
+}
+
+model Organization {
+  id               String   @id @default(cuid())
+  name             String
+  taxId            String   @unique // 統一編號
+  industry         String   @default("") // GICS industry code
+  boundaryMethod   String   @default("OPERATIONAL_CONTROL") // EQUITY_SHARE, FINANCIAL_CONTROL, OPERATIONAL_CONTROL
+  createdAt        DateTime @default(now())
+
+  users            User[]
+  units            OrganizationUnit[]
+  inventoryPeriods InventoryPeriod[]
+  reductionTargets ReductionTarget[]
+}
+
+model OrganizationUnit {
+  id          String   @id @default(cuid())
+  orgId       String
+  parentId    String?
+  name        String
+  type        String   @default("PLANT") // SUBSIDIARY, PLANT, DEPARTMENT
+  equityShare Float    @default(100) // percentage for equity share method
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  organization    Organization       @relation(fields: [orgId], references: [id])
+  parent          OrganizationUnit?  @relation("UnitHierarchy", fields: [parentId], references: [id])
+  children        OrganizationUnit[] @relation("UnitHierarchy")
+  emissionSources EmissionSource[]
+
+  @@index([orgId])
+  @@index([parentId])
+}
+
+// ============================================
+// M1: Inventory Management
+// ============================================
+
+model InventoryPeriod {
+  id          String   @id @default(cuid())
+  orgId       String
+  year        Int
+  name        String   // e.g. "2025 年度盤查"
+  status      String   @default("OPEN") // OPEN, IN_REVIEW, VERIFIED, LOCKED
+  isBaseYear  Boolean  @default(false)
+  startDate   DateTime
+  endDate     DateTime
+  createdAt   DateTime @default(now())
+
+  organization Organization    @relation(fields: [orgId], references: [id])
+  activityData ActivityData[]
+  tasks        TaskAssignment[]
+
+  @@unique([orgId, year])
+  @@index([orgId])
+}
+
+model EmissionSource {
+  id          String   @id @default(cuid())
+  unitId      String
+  scope       Int      // 1, 2
+  category    String   // STATIONARY_COMBUSTION, MOBILE_COMBUSTION, PROCESS, FUGITIVE, PURCHASED_ELECTRICITY, PURCHASED_STEAM
+  name        String   // e.g. "廠區鍋爐-天然氣"
+  description String   @default("") @db.VarChar(2000)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  unit         OrganizationUnit @relation(fields: [unitId], references: [id])
+  activityData ActivityData[]
+
+  @@index([unitId])
+}
+
+model EmissionFactor {
+  id            String   @id @default(cuid())
+  source        String   // EPA_TW, IPCC_AR6, GHG_PROTOCOL, DEFRA, CUSTOM
+  name          String   // e.g. "天然氣 (Natural Gas)"
+  scope         Int      // 1, 2
+  category      String   // matches EmissionSource.category
+  unit          String   // e.g. "kgCO2e/m3", "kgCO2e/kWh"
+  co2Factor     Float    @default(0)
+  ch4Factor     Float    @default(0)
+  n2oFactor     Float    @default(0)
+  hfcFactor     Float    @default(0)
+  pfcFactor     Float    @default(0)
+  sf6Factor     Float    @default(0)
+  nf3Factor     Float    @default(0)
+  totalFactor   Float    // sum of all GHG in CO2e
+  gwpSource     String   @default("IPCC_AR6") // GWP reference
+  effectiveYear Int      // year this factor applies
+  expiryYear    Int?
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  activityData  ActivityData[]
+}
+
+// ============================================
+// M2: Data Collection
+// ============================================
+
+model ActivityData {
+  id              String   @id @default(cuid())
+  periodId        String
+  sourceId        String
+  factorId        String?
+  month           Int      // 1-12
+  activityAmount  Float    // raw quantity (e.g. kWh, liters, m3)
+  activityUnit    String   // e.g. "kWh", "L", "m3", "kg"
+  emissionAmount  Float?   // calculated tCO2e
+  co2Amount       Float?
+  ch4Amount       Float?
+  n2oAmount       Float?
+  otherGhgAmount  Float?
+  dataQuality     String   @default("PRIMARY") // PRIMARY, SECONDARY, ESTIMATED
+  evidence        String   @default("") @db.VarChar(2000) // file path or description
+  status          String   @default("DRAFT") // DRAFT, SUBMITTED, APPROVED, REJECTED
+  rejectReason    String   @default("") @db.VarChar(2000)
+  enteredById     String
+  reviewedById    String?
+  enteredAt       DateTime @default(now())
+  reviewedAt      DateTime?
+
+  period       InventoryPeriod @relation(fields: [periodId], references: [id])
+  source       EmissionSource  @relation(fields: [sourceId], references: [id])
+  factor       EmissionFactor? @relation(fields: [factorId], references: [id])
+  enteredBy    User            @relation("EnteredBy", fields: [enteredById], references: [id])
+  reviewedBy   User?           @relation("ReviewedBy", fields: [reviewedById], references: [id])
+
+  @@index([periodId])
+  @@index([sourceId])
+  @@index([factorId])
+  @@index([enteredById])
+  @@index([reviewedById])
+}
+
+// ============================================
+// M1: Task Management for Inventory
+// ============================================
+
+model TaskAssignment {
+  id          String    @id @default(cuid())
+  periodId    String
+  assigneeId  String
+  description String    @db.Text
+  dueDate     DateTime?
+  status      String    @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED, OVERDUE
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  period   InventoryPeriod @relation(fields: [periodId], references: [id])
+  assignee User            @relation(fields: [assigneeId], references: [id])
+
+  @@index([periodId])
+  @@index([assigneeId])
+}
+
+// ============================================
+// M4: Reduction Management
+// ============================================
+
+model ReductionTarget {
+  id              String   @id @default(cuid())
+  orgId           String
+  baseYear        Int
+  targetYear      Int
+  targetType      String   @default("ABSOLUTE") // ABSOLUTE, INTENSITY
+  reductionPct    Float    // e.g. 42.0 means 42% reduction
+  baselineAmount  Float    // tCO2e in base year
+  description     String   @default("") @db.VarChar(2000)
+  createdAt       DateTime @default(now())
+
+  organization Organization @relation(fields: [orgId], references: [id])
+
+  @@index([orgId])
+}
+
+// ============================================
+// M8: Audit Trail
+// ============================================
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String
+  action     String   // CREATE, UPDATE, DELETE, LOGIN, LOGOUT, EXPORT
+  entity     String   // table name
+  entityId   String
+  before     String   @default("") @db.VarChar(2000) // JSON snapshot
+  after      String   @default("") @db.VarChar(2000) // JSON snapshot
+  ipAddress  String   @default("")
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
