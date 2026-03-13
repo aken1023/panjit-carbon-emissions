@@ -109,6 +109,7 @@ export function ChatPage({ userName }: ChatPageProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const sendingRef = useRef(false); // prevent double-send
 
   // Conversation history
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -223,7 +224,17 @@ export function ChatPage({ userName }: ChatPageProps) {
 
   const sendMessage = async (text?: string) => {
     const content = (text || input).trim();
-    if (!content || isLoading) return;
+    if (!content) return;
+
+    // Double-send guard: use ref to prevent race conditions
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+
+    // Abort any in-flight request first
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
 
     // Ensure we have a conversation
     let convoId = activeConvoId;
@@ -294,8 +305,8 @@ export function ChatPage({ userName }: ChatPageProps) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const text = decoder.decode(value, { stream: true });
-        const lines = text.split("\n");
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split("\n");
 
         for (const line of lines) {
           if (line.startsWith("data: ")) {
@@ -353,6 +364,7 @@ export function ChatPage({ userName }: ChatPageProps) {
       setStreamingContent("");
     } finally {
       setIsLoading(false);
+      sendingRef.current = false;
       abortRef.current = null;
     }
   };
@@ -506,7 +518,8 @@ export function ChatPage({ userName }: ChatPageProps) {
                   <button
                     key={q.label}
                     onClick={() => sendMessage(q.question)}
-                    className="flex items-start gap-2 rounded-xl border bg-card p-2.5 text-left text-sm transition-colors hover:bg-accent sm:gap-3 sm:p-3.5"
+                    disabled={isLoading}
+                    className="flex items-start gap-2 rounded-xl border bg-card p-2.5 text-left text-sm transition-colors hover:bg-accent disabled:opacity-50 disabled:pointer-events-none sm:gap-3 sm:p-3.5"
                   >
                     <q.icon className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                     <div>
@@ -571,7 +584,7 @@ export function ChatPage({ userName }: ChatPageProps) {
                       AI 助理
                     </p>
                     {streamingContent ? (
-                      <MarkdownContent content={streamingContent} />
+                      <StreamingMarkdownContent content={streamingContent} />
                     ) : (
                       <div className="space-y-1.5">
                         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -656,6 +669,7 @@ export function ChatPage({ userName }: ChatPageProps) {
 
 /** Global counter to ensure unique mermaid render IDs */
 let mermaidCounter = 0;
+let mermaidInitialized = false;
 
 const MERMAID_KEYWORDS = [
   "flowchart ",
@@ -684,35 +698,28 @@ function isMermaidCode(text: string): boolean {
 const PROSE_CLASSES =
   "prose prose-sm max-w-none text-xs leading-relaxed sm:text-sm dark:prose-invert prose-headings:mt-3 prose-headings:mb-1.5 sm:prose-headings:mt-4 sm:prose-headings:mb-2 prose-p:my-1 prose-li:my-0.5 prose-table:text-[10px] sm:prose-table:text-xs prose-th:bg-muted/50 prose-th:px-1.5 prose-th:py-1 sm:prose-th:px-2 sm:prose-th:py-1.5 prose-td:px-1.5 prose-td:py-1 sm:prose-td:px-2 sm:prose-td:py-1.5 prose-th:border prose-td:border prose-th:border-border prose-td:border-border prose-code:rounded prose-code:bg-muted prose-code:px-1 prose-code:py-0.5 prose-code:text-[10px] sm:prose-code:text-xs prose-code:font-mono prose-code:before:content-none prose-code:after:content-none [&_table]:block [&_table]:overflow-x-auto [&_table]:whitespace-nowrap sm:[&_table]:table sm:[&_table]:overflow-visible sm:[&_table]:whitespace-normal";
 
-function MarkdownContent({ content }: { content: string }) {
-  const containerRef = useRef<HTMLDivElement>(null);
+/** Render mermaid diagrams in a container (debounced, only after streaming finishes) */
+function renderMermaidInContainer(el: HTMLElement) {
+  const codeBlocks = el.querySelectorAll("pre code");
+  codeBlocks.forEach((codeEl) => {
+    const text = codeEl.textContent || "";
+    if (!isMermaidCode(text)) return;
 
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
+    const pre = codeEl.parentElement;
+    if (!pre || pre.getAttribute("data-mermaid") === "done") return;
+    pre.setAttribute("data-mermaid", "done");
 
-    const codeBlocks = el.querySelectorAll("pre code");
-    codeBlocks.forEach((codeEl) => {
-      const text = codeEl.textContent || "";
-      if (!isMermaidCode(text)) return;
+    const wrapper = document.createElement("div");
+    wrapper.className =
+      "my-3 overflow-x-auto rounded-xl border bg-white p-3 dark:bg-gray-950 max-h-[420px] overflow-y-auto";
+    wrapper.innerHTML = `<div class="flex items-center gap-2 text-xs text-gray-400"><svg class="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>圖表載入中...</div>`;
+    pre.replaceWith(wrapper);
 
-      const pre = codeEl.parentElement;
-      if (!pre) return;
+    const id = `mmd-${Date.now()}-${++mermaidCounter}`;
 
-      if (pre.getAttribute("data-mermaid") === "done") return;
-      pre.setAttribute("data-mermaid", "done");
-
-      const wrapper = document.createElement("div");
-      wrapper.className =
-        "my-3 overflow-x-auto rounded-xl border bg-white p-3 dark:bg-gray-950 max-h-[420px] overflow-y-auto";
-      wrapper.innerHTML = `<div class="flex items-center gap-2 text-xs text-gray-400"><svg class="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>圖表載入中...</div>`;
-
-      pre.replaceWith(wrapper);
-
-      const id = `mmd-${Date.now()}-${++mermaidCounter}`;
-
-      import("mermaid")
-        .then(({ default: mermaid }) => {
+    import("mermaid")
+      .then(({ default: mermaid }) => {
+        if (!mermaidInitialized) {
           mermaid.initialize({
             startOnLoad: false,
             theme: "default",
@@ -726,31 +733,73 @@ function MarkdownContent({ content }: { content: string }) {
             },
             fontSize: 12,
           });
-          return mermaid.render(id, text.trim());
-        })
-        .then(({ svg }) => {
-          wrapper.innerHTML = svg;
-          const svgEl = wrapper.querySelector("svg");
-          if (svgEl) {
-            svgEl.style.maxWidth = "100%";
-            svgEl.style.height = "auto";
-            svgEl.style.maxHeight = "380px";
-            svgEl.style.margin = "0 auto";
-            svgEl.style.display = "block";
-            svgEl.removeAttribute("width");
-          }
-        })
-        .catch(() => {
-          wrapper.className =
-            "my-2 rounded-lg border border-orange-200 bg-orange-50 p-3 text-xs text-orange-700 dark:border-orange-800 dark:bg-orange-950 dark:text-orange-300";
-          wrapper.innerHTML = `<p class="mb-1 font-medium">流程圖渲染失敗</p><pre class="whitespace-pre-wrap font-mono text-[10px]">${text.replace(/</g, "&lt;")}</pre>`;
-          document.getElementById(id)?.remove();
-        });
-    });
+          mermaidInitialized = true;
+        }
+        return mermaid.render(id, text.trim());
+      })
+      .then(({ svg }) => {
+        wrapper.innerHTML = svg;
+        const svgEl = wrapper.querySelector("svg");
+        if (svgEl) {
+          svgEl.style.maxWidth = "100%";
+          svgEl.style.height = "auto";
+          svgEl.style.maxHeight = "380px";
+          svgEl.style.margin = "0 auto";
+          svgEl.style.display = "block";
+          svgEl.removeAttribute("width");
+        }
+      })
+      .catch(() => {
+        wrapper.className =
+          "my-2 rounded-lg border border-orange-200 bg-orange-50 p-3 text-xs text-orange-700 dark:border-orange-800 dark:bg-orange-950 dark:text-orange-300";
+        wrapper.innerHTML = `<p class="mb-1 font-medium">流程圖渲染失敗</p><pre class="whitespace-pre-wrap font-mono text-[10px]">${text.replace(/</g, "&lt;")}</pre>`;
+        document.getElementById(id)?.remove();
+      });
+  });
+}
+
+/**
+ * MarkdownContent for finalized messages — renders mermaid diagrams.
+ * Only processes mermaid ONCE after mount (not on every re-render).
+ */
+function MarkdownContent({ content }: { content: string }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const processedRef = useRef(false);
+
+  useEffect(() => {
+    // Only process mermaid once per content snapshot
+    if (processedRef.current) return;
+    const el = containerRef.current;
+    if (!el) return;
+
+    // Small delay to ensure ReactMarkdown has finished rendering
+    const timer = setTimeout(() => {
+      renderMermaidInContainer(el);
+      processedRef.current = true;
+    }, 100);
+
+    return () => clearTimeout(timer);
+  }, [content]);
+
+  // Reset processed flag when content changes
+  useEffect(() => {
+    processedRef.current = false;
   }, [content]);
 
   return (
     <div ref={containerRef} className={PROSE_CLASSES}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
+}
+
+/**
+ * StreamingMarkdownContent — for in-progress streaming messages.
+ * Does NOT attempt mermaid rendering to avoid performance issues.
+ */
+function StreamingMarkdownContent({ content }: { content: string }) {
+  return (
+    <div className={PROSE_CLASSES}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
     </div>
   );
