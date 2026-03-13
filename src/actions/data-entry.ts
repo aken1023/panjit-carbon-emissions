@@ -114,8 +114,8 @@ export async function updateActivityData(
     where: { id },
   });
   if (!existing) return { error: "找不到此筆資料" };
-  if (existing.status !== "DRAFT") {
-    return { error: "僅草稿狀態的資料可以編輯" };
+  if (existing.status === "APPROVED") {
+    return { error: "已核准的資料需先退回才能編輯" };
   }
 
   // Recalculate emission
@@ -173,8 +173,8 @@ export async function deleteActivityData(
     where: { id },
   });
   if (!existing) return { error: "找不到此筆資料" };
-  if (existing.status !== "DRAFT") {
-    return { error: "僅草稿狀態的資料可以刪除" };
+  if (existing.status === "APPROVED") {
+    return { error: "已核准的資料無法刪除" };
   }
 
   await prisma.activityData.delete({ where: { id } });
@@ -211,4 +211,93 @@ export async function submitActivityData(
 
   revalidatePath("/data-entry");
   return { success: "活動數據已送審" };
+}
+
+export async function approveActivityData(
+  _prevState: DataEntryState,
+  formData: FormData
+): Promise<DataEntryState> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "請先登入" };
+  if (user.role !== "ADMIN" && user.role !== "CARBON_MANAGER") {
+    return { error: "僅管理員或碳管理主管可以核准" };
+  }
+
+  const id = formData.get("id") as string;
+  if (!id) return { error: "缺少資料 ID" };
+
+  const existing = await prisma.activityData.findUnique({ where: { id } });
+  if (!existing) return { error: "找不到此筆資料" };
+  if (existing.status !== "SUBMITTED") {
+    return { error: "僅已送審的資料可以核准" };
+  }
+
+  await prisma.activityData.update({
+    where: { id },
+    data: { status: "APPROVED", reviewedById: user.id, reviewedAt: new Date() },
+  });
+
+  revalidatePath("/data-entry");
+  return { success: "活動數據已核准" };
+}
+
+export async function rejectActivityData(
+  _prevState: DataEntryState,
+  formData: FormData
+): Promise<DataEntryState> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "請先登入" };
+  if (user.role !== "ADMIN" && user.role !== "CARBON_MANAGER") {
+    return { error: "僅管理員或碳管理主管可以退回" };
+  }
+
+  const id = formData.get("id") as string;
+  const reason = (formData.get("reason") as string) || "";
+  if (!id) return { error: "缺少資料 ID" };
+
+  const existing = await prisma.activityData.findUnique({ where: { id } });
+  if (!existing) return { error: "找不到此筆資料" };
+  if (existing.status !== "SUBMITTED" && existing.status !== "APPROVED") {
+    return { error: "此狀態的資料無法退回" };
+  }
+
+  await prisma.activityData.update({
+    where: { id },
+    data: {
+      status: "REJECTED",
+      rejectReason: reason,
+      reviewedById: user.id,
+      reviewedAt: new Date(),
+    },
+  });
+
+  revalidatePath("/data-entry");
+  return { success: "活動數據已退回" };
+}
+
+export async function revertToDraft(
+  _prevState: DataEntryState,
+  formData: FormData
+): Promise<DataEntryState> {
+  const user = await getCurrentUser();
+  if (!user) return { error: "請先登入" };
+
+  const id = formData.get("id") as string;
+  if (!id) return { error: "缺少資料 ID" };
+
+  const existing = await prisma.activityData.findUnique({ where: { id } });
+  if (!existing) return { error: "找不到此筆資料" };
+  if (existing.status === "APPROVED") {
+    if (user.role !== "ADMIN" && user.role !== "CARBON_MANAGER") {
+      return { error: "僅管理員可將已核准資料退回草稿" };
+    }
+  }
+
+  await prisma.activityData.update({
+    where: { id },
+    data: { status: "DRAFT", rejectReason: "" },
+  });
+
+  revalidatePath("/data-entry");
+  return { success: "已退回草稿狀態" };
 }
