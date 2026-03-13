@@ -2,23 +2,12 @@ import { redirect } from "next/navigation";
 import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import {
-  SCOPE_LABELS,
   CATEGORY_LABELS,
-  formatEmission,
 } from "@/lib/emission";
-import { Flame, Zap, TrendingDown, CheckCircle } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { PeriodSelector } from "./period-selector";
-import {
-  MonthlyEmissionsChart,
-  CategoryPieChart,
-  ScopePieChart,
-} from "./report-charts";
-import type {
-  MonthlyData,
-  CategoryData,
-  ScopeData,
-} from "./report-charts";
+import { ReportsPageClient } from "./reports-page";
+import type { ReportsPageProps } from "./reports-page";
+import type { MonthlyData, CategoryData, ScopeData } from "./report-charts";
 
 interface PageProps {
   searchParams: Promise<{ periodId?: string }>;
@@ -29,6 +18,11 @@ export default async function ReportsPage({ searchParams }: PageProps) {
   if (!user) redirect("/login");
 
   const params = await searchParams;
+
+  // Fetch organization
+  const org = await prisma.organization.findUnique({
+    where: { id: user.orgId },
+  });
 
   // Fetch all periods for this org
   const periods = await prisma.inventoryPeriod.findMany({
@@ -49,6 +43,7 @@ export default async function ReportsPage({ searchParams }: PageProps) {
           source: {
             include: { unit: true },
           },
+          factor: true,
         },
       })
     : [];
@@ -194,38 +189,84 @@ export default async function ReportsPage({ searchParams }: PageProps) {
     { name: "其他 (HFCs+PFCs+SF₆+NF₃)", amount: ghgTotals.other },
   ];
 
-  // Stats cards
-  const stats = [
+  // -- Inventory register data --
+  // Group by source: aggregate annual activity, emissions by GHG type
+  const registerMap = new Map<
+    string,
     {
-      label: "範疇一合計",
-      value: formatEmission(scope1Total),
-      icon: Flame,
-      color: "text-orange-600",
-      bgColor: "bg-orange-50 dark:bg-orange-950/30",
-    },
-    {
-      label: "範疇二合計",
-      value: formatEmission(scope2Total),
-      icon: Zap,
-      color: "text-blue-600",
-      bgColor: "bg-blue-50 dark:bg-blue-950/30",
-    },
-    {
-      label: "排放總量",
-      value: formatEmission(grandTotal),
-      icon: TrendingDown,
-      color: "text-primary",
-      bgColor: "bg-primary/10",
-    },
-    {
-      label: "已核准比例",
-      value: `${approvalRate}%`,
-      subtitle: `${approvedCount} / ${totalCount} 筆`,
-      icon: CheckCircle,
-      color: "text-emerald-600",
-      bgColor: "bg-emerald-50 dark:bg-emerald-950/30",
-    },
-  ];
+      unitName: string;
+      sourceName: string;
+      scope: number;
+      category: string;
+      categoryLabel: string;
+      annualActivity: number;
+      activityUnit: string;
+      factorValue: number;
+      factorUnit: string;
+      factorSource: string;
+      co2: number;
+      ch4: number;
+      n2o: number;
+      otherGhg: number;
+      total: number;
+    }
+  >();
+
+  for (const d of activityData) {
+    const key = `${d.sourceId}`;
+    if (!registerMap.has(key)) {
+      registerMap.set(key, {
+        unitName: d.source.unit.name,
+        sourceName: d.source.name,
+        scope: d.source.scope,
+        category: d.source.category,
+        categoryLabel: CATEGORY_LABELS[d.source.category] ?? d.source.category,
+        annualActivity: 0,
+        activityUnit: d.activityUnit,
+        factorValue: d.factor?.totalFactor ?? 0,
+        factorUnit: d.factor?.unit ?? "",
+        factorSource: d.factor?.source ?? "",
+        co2: 0,
+        ch4: 0,
+        n2o: 0,
+        otherGhg: 0,
+        total: 0,
+      });
+    }
+    const entry = registerMap.get(key)!;
+    entry.annualActivity += d.activityAmount;
+    entry.co2 += d.co2Amount ?? 0;
+    entry.ch4 += d.ch4Amount ?? 0;
+    entry.n2o += d.n2oAmount ?? 0;
+    entry.otherGhg += d.otherGhgAmount ?? 0;
+    entry.total += d.emissionAmount ?? 0;
+  }
+
+  // Sort by scope, then category, then source name
+  const registerData = Array.from(registerMap.values()).sort((a, b) => {
+    if (a.scope !== b.scope) return a.scope - b.scope;
+    if (a.category !== b.category) return a.category.localeCompare(b.category);
+    return a.sourceName.localeCompare(b.sourceName);
+  });
+
+  // -- Monthly detail data for export --
+  const monthlyDetail = activityData
+    .map((d) => ({
+      unitName: d.source.unit.name,
+      sourceName: d.source.name,
+      scope: d.source.scope,
+      category: CATEGORY_LABELS[d.source.category] ?? d.source.category,
+      month: d.month,
+      activityAmount: d.activityAmount,
+      activityUnit: d.activityUnit,
+      emissionAmount: d.emissionAmount ?? 0,
+    }))
+    .sort((a, b) => {
+      if (a.scope !== b.scope) return a.scope - b.scope;
+      if (a.sourceName !== b.sourceName)
+        return a.sourceName.localeCompare(b.sourceName);
+      return a.month - b.month;
+    });
 
   // Serialized periods for client component
   const serializedPeriods = periods.map((p) => ({
@@ -233,6 +274,30 @@ export default async function ReportsPage({ searchParams }: PageProps) {
     name: p.name,
     year: p.year,
   }));
+
+  // Props for client component
+  const clientProps: ReportsPageProps = {
+    orgName: org?.name ?? "",
+    orgTaxId: org?.taxId ?? "",
+    boundaryMethod: org?.boundaryMethod ?? "OPERATIONAL_CONTROL",
+    periodName: selectedPeriod?.name ?? "",
+    periodYear: selectedPeriod?.year ?? 0,
+    monthlyData,
+    categoryData,
+    scopeData,
+    approvalRate,
+    approvedCount,
+    totalCount,
+    totalScope1: scope1Total,
+    totalScope2: scope2Total,
+    grandTotal,
+    categoryGroups,
+    ghgRows,
+    ghgGrandTotal,
+    hasData: activityData.length > 0,
+    registerData,
+    monthlyDetail,
+  };
 
   return (
     <div className="space-y-6">
@@ -262,216 +327,7 @@ export default async function ReportsPage({ searchParams }: PageProps) {
         </div>
       )}
 
-      {selectedPeriod && (
-        <>
-          {/* Summary cards */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {stats.map((stat) => (
-              <div key={stat.label} className="rounded-xl border bg-card p-5">
-                <div className="flex items-center justify-between">
-                  <p className="text-sm text-muted-foreground">{stat.label}</p>
-                  <div className={`rounded-lg p-2 ${stat.bgColor}`}>
-                    <stat.icon className={`h-4 w-4 ${stat.color}`} />
-                  </div>
-                </div>
-                <p className="mt-2 text-2xl font-bold">{stat.value}</p>
-                {"subtitle" in stat && stat.subtitle && (
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    {stat.subtitle}
-                  </p>
-                )}
-              </div>
-            ))}
-          </div>
-
-          {/* No approved data notice */}
-          {activityData.length === 0 && (
-            <div className="rounded-xl border bg-card p-8 text-center">
-              <p className="text-base font-medium text-muted-foreground">
-                此期間尚無已核准的排放數據
-              </p>
-              <p className="mt-1 text-sm text-muted-foreground">
-                請先至「數據填報」提交並核准活動數據後，即可查看報告。
-              </p>
-            </div>
-          )}
-
-          {activityData.length > 0 && (
-            <>
-              {/* Charts section */}
-              <MonthlyEmissionsChart data={monthlyData} />
-
-              <div className="grid gap-4 lg:grid-cols-2">
-                <CategoryPieChart data={categoryData} />
-                <ScopePieChart data={scopeData} />
-              </div>
-
-              {/* Detail table */}
-              <div className="rounded-xl border bg-card">
-                <div className="border-b px-5 py-4">
-                  <h3 className="text-base font-semibold">排放源明細</h3>
-                  <p className="mt-0.5 text-sm text-muted-foreground">
-                    依排放類別分組，僅含已核准資料
-                  </p>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b bg-muted/50">
-                        <th className="px-5 py-3 text-left font-medium">
-                          排放源
-                        </th>
-                        <th className="px-5 py-3 text-left font-medium">
-                          廠區
-                        </th>
-                        <th className="px-5 py-3 text-right font-medium">
-                          年排放量 (tCO₂e)
-                        </th>
-                        <th className="px-5 py-3 text-right font-medium">
-                          佔比 (%)
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {categoryGroups.map((group) => (
-                        <>
-                          {/* Category header */}
-                          <tr
-                            key={`header-${group.category}`}
-                            className="border-b bg-muted/30"
-                          >
-                            <td
-                              colSpan={4}
-                              className="px-5 py-2.5 font-semibold"
-                            >
-                              <Badge variant="outline" className="mr-2">
-                                {group.categoryLabel}
-                              </Badge>
-                            </td>
-                          </tr>
-                          {/* Rows */}
-                          {group.rows.map((row, idx) => (
-                            <tr
-                              key={`${group.category}-${idx}`}
-                              className="border-b last:border-b-0 hover:bg-muted/20 transition-colors"
-                            >
-                              <td className="px-5 py-2.5 pl-8">
-                                {row.sourceName}
-                              </td>
-                              <td className="px-5 py-2.5 text-muted-foreground">
-                                {row.unitName}
-                              </td>
-                              <td className="px-5 py-2.5 text-right font-mono">
-                                {row.emission.toFixed(4)}
-                              </td>
-                              <td className="px-5 py-2.5 text-right font-mono text-muted-foreground">
-                                {row.percentage.toFixed(2)}%
-                              </td>
-                            </tr>
-                          ))}
-                          {/* Subtotal */}
-                          <tr
-                            key={`subtotal-${group.category}`}
-                            className="border-b bg-muted/10"
-                          >
-                            <td
-                              colSpan={2}
-                              className="px-5 py-2 text-right text-sm font-medium text-muted-foreground"
-                            >
-                              小計
-                            </td>
-                            <td className="px-5 py-2 text-right font-mono font-semibold">
-                              {group.subtotal.toFixed(4)}
-                            </td>
-                            <td className="px-5 py-2 text-right font-mono text-muted-foreground">
-                              {group.subtotalPercentage.toFixed(2)}%
-                            </td>
-                          </tr>
-                        </>
-                      ))}
-                      {/* Grand total */}
-                      <tr className="border-t-2 bg-muted/40">
-                        <td
-                          colSpan={2}
-                          className="px-5 py-3 text-right font-semibold"
-                        >
-                          總計
-                        </td>
-                        <td className="px-5 py-3 text-right font-mono text-base font-bold">
-                          {grandTotal.toFixed(4)}
-                        </td>
-                        <td className="px-5 py-3 text-right font-mono font-semibold">
-                          100.00%
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-
-              {/* GHG breakdown table */}
-              <div className="rounded-xl border bg-card">
-                <div className="border-b px-5 py-4">
-                  <h3 className="text-base font-semibold">
-                    溫室氣體種類分析
-                  </h3>
-                  <p className="mt-0.5 text-sm text-muted-foreground">
-                    各溫室氣體排放量明細
-                  </p>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="border-b bg-muted/50">
-                        <th className="px-5 py-3 text-left font-medium">
-                          溫室氣體
-                        </th>
-                        <th className="px-5 py-3 text-right font-medium">
-                          排放量 (tCO₂e)
-                        </th>
-                        <th className="px-5 py-3 text-right font-medium">
-                          佔比 (%)
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {ghgRows.map((row) => (
-                        <tr
-                          key={row.name}
-                          className="border-b last:border-b-0 hover:bg-muted/20 transition-colors"
-                        >
-                          <td className="px-5 py-2.5 font-medium">
-                            {row.name}
-                          </td>
-                          <td className="px-5 py-2.5 text-right font-mono">
-                            {row.amount.toFixed(4)}
-                          </td>
-                          <td className="px-5 py-2.5 text-right font-mono text-muted-foreground">
-                            {ghgGrandTotal > 0
-                              ? ((row.amount / ghgGrandTotal) * 100).toFixed(2)
-                              : "0.00"}
-                            %
-                          </td>
-                        </tr>
-                      ))}
-                      {/* Total */}
-                      <tr className="border-t-2 bg-muted/40">
-                        <td className="px-5 py-3 font-semibold">總計</td>
-                        <td className="px-5 py-3 text-right font-mono text-base font-bold">
-                          {ghgGrandTotal.toFixed(4)}
-                        </td>
-                        <td className="px-5 py-3 text-right font-mono font-semibold">
-                          100.00%
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            </>
-          )}
-        </>
-      )}
+      {selectedPeriod && <ReportsPageClient {...clientProps} />}
     </div>
   );
 }

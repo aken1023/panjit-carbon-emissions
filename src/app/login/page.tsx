@@ -4,7 +4,7 @@ import { LoginForm } from "./login-form";
 
 export default async function LoginPage() {
   const user = await getCurrentUser();
-  if (user) redirect("/");
+  if (user) redirect("/chat");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-primary/5 to-background p-4">
@@ -16,21 +16,6 @@ export default async function LoginPage() {
           </p>
         </div>
         <LoginForm />
-
-        {/* Demo accounts */}
-        <div className="rounded-lg border bg-muted/50 p-4 text-sm">
-          <p className="mb-2 font-medium text-muted-foreground">測試帳號</p>
-          <div className="space-y-1.5 text-muted-foreground">
-            <div className="flex justify-between">
-              <span>管理員</span>
-              <span className="font-mono text-xs">admin@panjit.com / admin123</span>
-            </div>
-            <div className="flex justify-between">
-              <span>碳管主管</span>
-              <span className="font-mono text-xs">carbon@panjit.com / carbon123</span>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   );

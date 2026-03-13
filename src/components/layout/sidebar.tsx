@@ -14,6 +14,11 @@ import {
   X,
   Leaf,
   MessageCircle,
+  Calculator,
+  SearchCheck,
+  Upload,
+  PackageSearch,
+  ShieldCheck,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -34,12 +39,17 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 const navItems = [
-  { href: "/", label: "儀表板", icon: LayoutDashboard },
+  { href: "/dashboard", label: "儀表板", icon: LayoutDashboard },
   { href: "/organization", label: "組織管理", icon: Building2 },
   { href: "/inventory", label: "碳盤查管理", icon: ClipboardList },
   { href: "/sources", label: "排放源清單", icon: Flame },
   { href: "/data-entry", label: "資料填報", icon: FileSpreadsheet },
+  { href: "/data-import", label: "批次匯入", icon: Upload },
+  { href: "/analysis", label: "重大性分析", icon: SearchCheck },
+  { href: "/calculators", label: "碳排計算機", icon: Calculator },
   { href: "/reports", label: "揭露報告", icon: BarChart3 },
+  { href: "/compliance", label: "合規報告", icon: ShieldCheck },
+  { href: "/lca", label: "產品碳足跡", icon: PackageSearch },
   { href: "/reduction", label: "減碳管理", icon: Target },
   { href: "/chat", label: "AI 助理", icon: MessageCircle },
   { href: "/settings", label: "系統設定", icon: Settings },

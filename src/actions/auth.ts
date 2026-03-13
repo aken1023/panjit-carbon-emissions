@@ -19,5 +19,5 @@ export async function login(_prevState: unknown, formData: FormData) {
   }
 
   await setSession(user.id);
-  redirect("/");
+  redirect("/chat");
 }
