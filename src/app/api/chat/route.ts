@@ -1,7 +1,11 @@
 import OpenAI from "openai";
 import { NextRequest } from "next/server";
+import { prisma } from "@/lib/prisma";
+import { getCurrentUser } from "@/lib/auth";
 
 const SYSTEM_PROMPT = `你是強茂科技碳排管理系統的 AI 助理，專精於溫室氣體排放係數查詢與碳足跡計算。你整合了四大排放係數資料庫的完整知識，幫助企業用戶查詢排放係數、解答碳盤查相關問題。
+
+**重要：你可以存取公司的碳排數據庫，包含各廠區排放源、活動數據、排放量統計。當用戶詢問公司現況、排放分析、減量建議時，請依據「公司碳排數據」段落中的實際數據進行分析，而非編造數字。**
 
 # 資料庫一：EEIO（環境擴展投入產出）
 
@@ -232,6 +236,241 @@ function buildSearchContext(results: SearchResult[]): string {
 }
 
 // ---------------------------------------------------------------------------
+// Company data context for AI analysis
+// ---------------------------------------------------------------------------
+async function getCompanyDataContext(): Promise<string> {
+  try {
+    const user = await getCurrentUser();
+    if (!user) return "";
+
+    const orgId = user.orgId;
+
+    // Get org info
+    const org = await prisma.organization.findUnique({ where: { id: orgId } });
+    if (!org) return "";
+
+    // Get current period
+    const currentPeriod = await prisma.inventoryPeriod.findFirst({
+      where: { orgId, status: { in: ["OPEN", "IN_REVIEW"] } },
+      orderBy: { year: "desc" },
+    });
+
+    // Get all periods for comparison
+    const periods = await prisma.inventoryPeriod.findMany({
+      where: { orgId },
+      orderBy: { year: "asc" },
+    });
+
+    // Get organization units
+    const units = await prisma.organizationUnit.findMany({
+      where: { orgId },
+    });
+
+    // Get emission sources
+    const sources = await prisma.emissionSource.findMany({
+      where: { unitId: { in: units.map((u) => u.id) } },
+      include: { unit: true },
+    });
+
+    // Get activity data with emission amounts per period
+    const activityData = await prisma.activityData.findMany({
+      where: { periodId: { in: periods.map((p) => p.id) } },
+      include: { source: { include: { unit: true } }, factor: true },
+    });
+
+    // --- Aggregate data ---
+
+    // By period
+    const periodSummary = periods.map((p) => {
+      const pData = activityData.filter((d) => d.periodId === p.id);
+      const totalEmission = pData.reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      const scope1 = pData.filter((d) => d.source.scope === 1).reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      const scope2 = pData.filter((d) => d.source.scope === 2).reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+
+      const statusCounts = {
+        DRAFT: pData.filter((d) => d.status === "DRAFT").length,
+        SUBMITTED: pData.filter((d) => d.status === "SUBMITTED").length,
+        APPROVED: pData.filter((d) => d.status === "APPROVED").length,
+        REJECTED: pData.filter((d) => d.status === "REJECTED").length,
+      };
+
+      return {
+        year: p.year,
+        name: p.name,
+        status: p.status,
+        isBaseYear: p.isBaseYear,
+        totalEmission: totalEmission.toFixed(2),
+        scope1: scope1.toFixed(2),
+        scope2: scope2.toFixed(2),
+        dataCount: pData.length,
+        statusCounts,
+      };
+    });
+
+    // By unit for current period
+    const currentPeriodId = currentPeriod?.id;
+    const currentData = currentPeriodId
+      ? activityData.filter((d) => d.periodId === currentPeriodId)
+      : [];
+
+    const unitSummary = units.map((u) => {
+      const uData = currentData.filter((d) => d.source.unitId === u.id);
+      const totalEmission = uData.reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      const scope1 = uData.filter((d) => d.source.scope === 1).reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      const scope2 = uData.filter((d) => d.source.scope === 2).reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      return {
+        name: u.name,
+        type: u.type,
+        equityShare: u.equityShare,
+        totalEmission: totalEmission.toFixed(2),
+        scope1: scope1.toFixed(2),
+        scope2: scope2.toFixed(2),
+        dataCount: uData.length,
+      };
+    });
+
+    // By category for current period
+    const categoryMap: Record<string, number> = {};
+    currentData.forEach((d) => {
+      const cat = d.source.category;
+      categoryMap[cat] = (categoryMap[cat] ?? 0) + (d.emissionAmount ?? 0);
+    });
+
+    // Monthly trend for current period
+    const monthlyTrend = Array.from({ length: 12 }, (_, i) => {
+      const month = i + 1;
+      const mData = currentData.filter((d) => d.month === month);
+      const total = mData.reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      return { month, total: total.toFixed(2), dataCount: mData.length };
+    });
+
+    // Top emission sources
+    const sourceEmissions = sources.map((s) => {
+      const sData = currentData.filter((d) => d.sourceId === s.id);
+      const total = sData.reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      return {
+        name: s.name,
+        unit: s.unit.name,
+        scope: s.scope,
+        category: s.category,
+        total: total.toFixed(2),
+      };
+    }).sort((a, b) => parseFloat(b.total) - parseFloat(a.total));
+
+    // Reduction targets
+    const targets = await prisma.reductionTarget.findMany({
+      where: { orgId },
+    });
+
+    // Data quality summary
+    const qualityCount = {
+      PRIMARY: currentData.filter((d) => d.dataQuality === "PRIMARY").length,
+      SECONDARY: currentData.filter((d) => d.dataQuality === "SECONDARY").length,
+      ESTIMATED: currentData.filter((d) => d.dataQuality === "ESTIMATED").length,
+    };
+
+    // YoY change calculation
+    let yoyChange = "";
+    if (periods.length >= 2) {
+      const prevPeriod = periods.find((p) => p.isBaseYear) || periods[periods.length - 2];
+      const prevData = activityData.filter((d) => d.periodId === prevPeriod.id);
+      const prevTotal = prevData.reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      const currTotal = currentData.reduce((sum, d) => sum + (d.emissionAmount ?? 0), 0);
+      if (prevTotal > 0) {
+        const changePct = ((currTotal - prevTotal) / prevTotal * 100).toFixed(1);
+        yoyChange = `\n- 與${prevPeriod.year}年相比變化：${changePct}%（${parseFloat(changePct) < 0 ? "減少" : "增加"}）`;
+      }
+    }
+
+    const CATEGORY_LABELS: Record<string, string> = {
+      STATIONARY_COMBUSTION: "固定燃燒源",
+      MOBILE_COMBUSTION: "移動燃燒源",
+      PROCESS: "製程排放",
+      FUGITIVE: "逸散排放",
+      PURCHASED_ELECTRICITY: "外購電力",
+      PURCHASED_STEAM: "外購蒸汽/熱能",
+    };
+
+    // Build context string
+    let ctx = `\n\n# 📊 公司碳排數據（即時數據，來自資料庫）\n\n`;
+    ctx += `## 公司資訊\n`;
+    ctx += `- 公司名稱：${org.name}\n`;
+    ctx += `- 統一編號：${org.taxId}\n`;
+    ctx += `- 產業：${org.industry}\n`;
+    ctx += `- 盤查邊界方法：${org.boundaryMethod === "OPERATIONAL_CONTROL" ? "營運控制權法" : org.boundaryMethod === "EQUITY_SHARE" ? "股權比例法" : "財務控制權法"}\n`;
+    ctx += `- 組織單位數：${units.length} 個（${units.map((u) => `${u.name}(${u.equityShare}%)`).join("、")}）\n`;
+
+    ctx += `\n## 盤查期間總覽\n`;
+    ctx += `| 年度 | 名稱 | 狀態 | 基準年 | 範疇一(tCO2e) | 範疇二(tCO2e) | 合計(tCO2e) | 資料筆數 |\n`;
+    ctx += `|------|------|------|--------|---------------|---------------|-------------|----------|\n`;
+    periodSummary.forEach((p) => {
+      ctx += `| ${p.year} | ${p.name} | ${p.status} | ${p.isBaseYear ? "✓" : ""} | ${p.scope1} | ${p.scope2} | ${p.totalEmission} | ${p.dataCount} |\n`;
+    });
+
+    if (currentPeriod) {
+      ctx += `\n## ${currentPeriod.year} 年度（當前盤查）詳細數據\n`;
+
+      ctx += `\n### 各廠區排放\n`;
+      ctx += `| 廠區 | 範疇一(tCO2e) | 範疇二(tCO2e) | 合計(tCO2e) | 資料筆數 |\n`;
+      ctx += `|------|---------------|---------------|-------------|----------|\n`;
+      unitSummary.forEach((u) => {
+        ctx += `| ${u.name} | ${u.scope1} | ${u.scope2} | ${u.totalEmission} | ${u.dataCount} |\n`;
+      });
+
+      ctx += `\n### 各類別排放\n`;
+      ctx += `| 排放類別 | 排放量(tCO2e) |\n`;
+      ctx += `|----------|---------------|\n`;
+      Object.entries(categoryMap)
+        .sort(([, a], [, b]) => b - a)
+        .forEach(([cat, amount]) => {
+          ctx += `| ${CATEGORY_LABELS[cat] || cat} | ${amount.toFixed(2)} |\n`;
+        });
+
+      ctx += `\n### 月度排放趨勢\n`;
+      ctx += `| 月份 | 排放量(tCO2e) | 資料筆數 |\n`;
+      ctx += `|------|---------------|----------|\n`;
+      monthlyTrend.forEach((m) => {
+        ctx += `| ${m.month}月 | ${m.total} | ${m.dataCount} |\n`;
+      });
+
+      ctx += `\n### 前10大排放源\n`;
+      ctx += `| 排名 | 排放源 | 廠區 | 範疇 | 類別 | 排放量(tCO2e) |\n`;
+      ctx += `|------|--------|------|------|------|---------------|\n`;
+      sourceEmissions.slice(0, 10).forEach((s, i) => {
+        ctx += `| ${i + 1} | ${s.name} | ${s.unit} | 範疇${s.scope} | ${CATEGORY_LABELS[s.category] || s.category} | ${s.total} |\n`;
+      });
+
+      ctx += `\n### 資料品質分佈\n`;
+      ctx += `- 一級數據（實測/帳單）：${qualityCount.PRIMARY} 筆\n`;
+      ctx += `- 二級數據（供應商）：${qualityCount.SECONDARY} 筆\n`;
+      ctx += `- 推估數據：${qualityCount.ESTIMATED} 筆\n`;
+
+      const totalStatusCount = currentData.length;
+      const approvedCount = currentData.filter((d) => d.status === "APPROVED").length;
+      ctx += `\n### 資料審核進度\n`;
+      ctx += `- 草稿：${currentData.filter((d) => d.status === "DRAFT").length} 筆\n`;
+      ctx += `- 已送審：${currentData.filter((d) => d.status === "SUBMITTED").length} 筆\n`;
+      ctx += `- 已核准：${approvedCount} 筆\n`;
+      ctx += `- 已退回：${currentData.filter((d) => d.status === "REJECTED").length} 筆\n`;
+      ctx += `- 審核完成率：${totalStatusCount > 0 ? ((approvedCount / totalStatusCount) * 100).toFixed(1) : 0}%\n`;
+      ctx += yoyChange;
+    }
+
+    if (targets.length > 0) {
+      ctx += `\n### 減量目標\n`;
+      targets.forEach((t) => {
+        ctx += `- ${t.targetYear}年目標：相較${t.baseYear}年減少 ${t.reductionPct}%（基準量 ${t.baselineAmount} tCO2e）— ${t.description}\n`;
+      });
+    }
+
+    return ctx;
+  } catch (error) {
+    console.error("Error gathering company data:", error);
+    return "";
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Chat API handler
 // ---------------------------------------------------------------------------
 interface ChatMessage {
@@ -259,9 +498,13 @@ export async function POST(request: NextRequest) {
     const lastUserMessage = messages.filter((m) => m.role === "user").pop();
     const searchQuery = lastUserMessage?.content ?? "";
 
-    // Perform web search in parallel with client setup
-    const [searchResults, client] = await Promise.all([
+    // Determine if we need company data (keywords that suggest analysis)
+    const needsCompanyData = /公司|排放|分析|數據|統計|報告|比較|趨勢|減量|目標|廠區|碳排|盤查|現況|狀況|建議|排名|改善|效能|概況|總覽|dashboard/i.test(searchQuery);
+
+    // Perform web search + company data gathering in parallel
+    const [searchResults, companyData, client] = await Promise.all([
       searchWeb(searchQuery),
+      needsCompanyData ? getCompanyDataContext() : Promise.resolve(""),
       Promise.resolve(
         new OpenAI({
           baseURL: "https://api.deepseek.com",
@@ -294,7 +537,7 @@ export async function POST(request: NextRequest) {
       stream: true,
       stream_options: { include_usage: true },
       messages: [
-        { role: "system", content: SYSTEM_PROMPT + searchContext },
+        { role: "system", content: SYSTEM_PROMPT + companyData + searchContext },
         ...contextMessages.map((m) => ({
           role: m.role as "user" | "assistant",
           content: m.content,
